@@ -41,7 +41,9 @@ export class CreditService {
     return Math.floor(usdCents * 600);
   }
 
-  async claimWithUsdcTransfer(args: ClaimArgs): Promise<{ ok: true; creditsMilli: number; addedMilli: number }> {
+  async claimWithUsdcTransfer(
+    args: ClaimArgs
+  ): Promise<{ ok: true; creditsMilli: number; addedMilli: number }> {
     if (!ENV.BSC_RPC_URL) {
       throw new Error("Server missing BSC_RPC_URL env var.");
     }
@@ -54,12 +56,16 @@ export class CreditService {
     // 2) ENV.BSC_USDC_ADDRESS (recommended)
     // 3) default to BSC Binance-Peg USDC
     const tokenAddress = normalizeAddr(
-      args.tokenAddress || ENV.BSC_USDC_ADDRESS || "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
+      args.tokenAddress ||
+        ENV.BSC_USDC_ADDRESS ||
+        "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
     );
     const treasury = normalizeAddr(ENV.TREASURY_ADDRESS);
 
     // Require tx confirmations (helps prevent reorg / race conditions)
-    const minConf = Number.isFinite(ENV.MIN_CONFIRMATIONS) ? Math.max(0, ENV.MIN_CONFIRMATIONS) : 2;
+    const minConf = Number.isFinite(ENV.MIN_CONFIRMATIONS)
+      ? Math.max(0, ENV.MIN_CONFIRMATIONS)
+      : 2;
 
     // prevent double-credits for the same txHash
     const existing = await this.prisma.creditTransaction.findFirst({
@@ -72,7 +78,11 @@ export class CreditService {
 
     const provider = new ethers.JsonRpcProvider(ENV.BSC_RPC_URL);
     const receipt = await provider.getTransactionReceipt(args.txHash);
-    if (!receipt) throw new Error("Transaction not found yet (wait for confirmations and retry).");
+    if (!receipt) {
+      throw new Error(
+        "Transaction not found yet (wait for confirmations and retry)."
+      );
+    }
     if (receipt.status !== 1) throw new Error("Transaction failed on-chain.");
 
     if (minConf > 0) {
@@ -84,7 +94,10 @@ export class CreditService {
     }
 
     // Tie the credit to the authenticated user's wallet (prevents claiming someone else's tx)
-    const user = await this.prisma.user.findUnique({ where: { id: args.userId }, select: { wallet: true } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: args.userId },
+      select: { wallet: true }
+    });
     const userWallet = user?.wallet ? normalizeAddr(user.wallet) : null;
 
     // Use token decimals from chain if possible
@@ -98,20 +111,49 @@ export class CreditService {
 
     // Find a Transfer(from, to, value) log to treasury
     const iface = new ethers.Interface(ERC20_ABI);
-    const transferTopic = iface.getEvent("Transfer").topicHash;
+
+    // SAFE: getEvent can throw or be undefined depending on typings/ABI
+    let transferTopic: string | undefined;
+    try {
+      const transferEvent = iface.getEvent("Transfer");
+      transferTopic = transferEvent?.topicHash;
+    } catch {
+      transferTopic = undefined;
+    }
+    if (!transferTopic) {
+      throw new Error("ERC20 ABI missing Transfer event.");
+    }
 
     // Expected units based on input amount
     const expectedUnits = parseAmountToUnits(args.amount, decimals);
 
     let matched = false;
+
     for (const log of receipt.logs) {
       if (normalizeAddr(log.address) !== tokenAddress) continue;
       if (!log.topics || log.topics[0] !== transferTopic) continue;
 
-      const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-      const from = normalizeAddr(parsed.args.from);
-      const to = normalizeAddr(parsed.args.to);
-      const value = BigInt(parsed.args.value.toString());
+      // SAFE: parseLog can throw for malformed/mismatched logs
+      let parsed: ethers.LogDescription | null = null;
+      try {
+        parsed = iface.parseLog({ topics: log.topics, data: log.data });
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || !parsed.args) continue;
+
+      // SAFE: args typing is broad; extract defensively
+      const fromArg = (parsed.args as any).from as string | undefined;
+      const toArg = (parsed.args as any).to as string | undefined;
+      const valueArg = (parsed.args as any).value as
+        | ethers.BigNumberish
+        | undefined;
+
+      if (!fromArg || !toArg || valueArg === undefined) continue;
+
+      const from = normalizeAddr(fromArg);
+      const to = normalizeAddr(toArg);
+      const value = BigInt(valueArg.toString());
 
       if (to !== treasury) continue;
 
@@ -126,7 +168,9 @@ export class CreditService {
     }
 
     if (!matched) {
-      throw new Error("Could not verify a USDC Transfer to the treasury in this transaction.");
+      throw new Error(
+        "Could not verify a USDC Transfer to the treasury in this transaction."
+      );
     }
 
     // Convert amount -> credits
@@ -136,6 +180,7 @@ export class CreditService {
     if (!Number.isFinite(usdCents) || usdCents <= 0) {
       throw new Error("Invalid amount.");
     }
+
     const addedMilli = this.usdCentsToMilliCredits(usdCents);
     if (addedMilli <= 0) throw new Error("Amount too small for credits.");
 
@@ -160,6 +205,6 @@ export class CreditService {
       return user;
     });
 
-    return { ok: true, creditsMilli: result.creditsMilli, addedMilli: addedMilli };
+    return { ok: true, creditsMilli: result.creditsMilli, addedMilli };
   }
 }
