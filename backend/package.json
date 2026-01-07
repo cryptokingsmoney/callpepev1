@@ -11,7 +11,7 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
-    "@prisma/client": "^5.0.0",
+    "@prisma/client": "^5.22.0",
     "cors": "^2.8.5",
     "db": "^6.0.3",
     "dotenv": "^16.6.1",
@@ -21,8 +21,8 @@
     "helmet": "^7.0.0",
     "jsonwebtoken": "^9.0.0",
     "neonctl": "^2.18.1",
-    "npx": "^10.2.2",
     "pg": "^8.16.3",
+    "prisma": "^5.22.0",
     "push": "^0.1.0",
     "socket.io": "^4.7.0",
     "stripe": "^15.0.0",
@@ -34,7 +34,6 @@
     "@types/helmet": "^4.0.0",
     "@types/jsonwebtoken": "^9.0.2",
     "@types/node": "^20.0.0",
-    "prisma": "^5.22.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.0.0"
   }
