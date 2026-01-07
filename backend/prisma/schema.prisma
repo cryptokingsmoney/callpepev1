@@ -32,22 +32,21 @@ model User {
   email   String?
   role    UserRole @default(USER)
 
-  /// Pricing model:
-  /// - $1.00 = 60 credits
-  /// - Base unit: milli-credits (1 credit = 1000 milli)
-  /// - Credits can be fractional for low creator rates (e.g. $0.25/min = 0.25 credits/sec)
-  ///
   /// Stored in milli-credits to keep everything integer & auditable.
   creditsMilli Int @default(0)
+
+  /// Optional freeze controls (used by webhook dispute/refund safety)
+  isFrozen     Boolean @default(false)
+  frozenReason String?
 
   creatorProfile CreatorProfile?
 
   callsMade     Call[] @relation("CallsMade")
   callsReceived Call[] @relation("CallsReceived")
 
-  groupsOwned       Group[]        @relation("UserGroupsOwned")
-  groupMemberships  GroupMember[]  @relation("UserGroupMemberships")
-  hostedGroupCalls  GroupCall[]    @relation("UserHostedGroupCalls")
+  groupsOwned       Group[]       @relation("UserGroupsOwned")
+  groupMemberships  GroupMember[] @relation("UserGroupMemberships")
+  hostedGroupCalls  GroupCall[]   @relation("UserHostedGroupCalls")
 
   creditTxs CreditTransaction[]
 
@@ -56,20 +55,26 @@ model User {
 }
 
 model CreditTransaction {
-  id           String       @id @default(cuid())
-  userId       String
-  type         CreditTxType
-  usdCents     Int?
+  id               String       @id @default(cuid())
+  userId           String
+  type             CreditTxType
+  usdCents         Int?
   creditsDeltaMilli Int
-  ref          String?
+  ref              String?
 
   user User @relation(fields: [userId], references: [id])
 
   createdAt DateTime @default(now())
 
   @@index([userId])
-
   @@unique([ref])
+}
+
+model WebhookEvent {
+  /// Stores Stripe event.id for optional global idempotency
+  id        String   @id
+  type      String
+  createdAt DateTime @default(now())
 }
 
 model CreatorProfile {
@@ -77,21 +82,14 @@ model CreatorProfile {
   userId String @unique
 
   /// Milli-credits charged per second.
-  /// Default: 1 credit/sec (=$1/min at $1=60 credits) => 1000 milli-credits/sec.
   rateMilliCreditsPerSecond Int @default(1000)
 
   bio      String?
   isOnline Boolean @default(false)
 
-  /// Creator earnings ledger
-  /// - earnedMilli: total milli-credits earned from calls (after split)
-  /// - availableMilli: current withdrawable balance (earned - paidOut)
-  ///
-  /// We keep this integer (milli-credits) so it's auditable and matches call billing.
-  earnedMilli    Int @default(0)
-  paidOutMilli   Int @default(0)
+  earnedMilli  Int @default(0)
+  paidOutMilli Int @default(0)
 
-  /// Stripe Connect account for cashout (optional)
   stripeAccountId String? @unique
 
   user User @relation(fields: [userId], references: [id])
@@ -133,7 +131,6 @@ model CreatorPayoutRequest {
   status        PayoutStatus @default(REQUESTED)
   note          String?
 
-  // Stripe bookkeeping (only for method=STRIPE)
   stripeTransferId String?
   stripePayoutId   String?
 
@@ -150,19 +147,16 @@ model Call {
   userId    String
   creatorId String
 
-  roomId  String?
-  status  CallStatus @default(ACTIVE)
+  roomId String?
+  status CallStatus @default(ACTIVE)
 
   startTime DateTime @default(now())
   endTime   DateTime?
 
-  /// Total seconds billed for this call (server-authoritative).
   secondsBilled Int @default(0)
 
-  /// Total milli-credits spent for this call (server-authoritative).
   creditsSpentMilli Int @default(0)
 
-  /// Rate used for this call (milli-credits per second) to make billing auditable.
   rateMilliCreditsPerSecond Int @default(1000)
 
   user    User @relation("CallsMade", fields: [userId], references: [id])
