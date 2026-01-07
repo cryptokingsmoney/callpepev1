@@ -29,9 +29,9 @@ async function freezeUser(userId: string, reason: string) {
     await prisma.user.update({
       where: { id: userId },
       data: {
-        // @ts-expect-error - optional fields
+        // @ts-expect-error - optional fields (if you added them)
         isFrozen: true,
-        // @ts-expect-error - optional fields
+        // @ts-expect-error - optional fields (if you added them)
         frozenReason: reason,
       },
     });
@@ -45,9 +45,9 @@ async function unfreezeUser(userId: string) {
     await prisma.user.update({
       where: { id: userId },
       data: {
-        // @ts-expect-error - optional fields
+        // @ts-expect-error - optional fields (if you added them)
         isFrozen: false,
-        // @ts-expect-error - optional fields
+        // @ts-expect-error - optional fields (if you added them)
         frozenReason: null,
       },
     });
@@ -113,7 +113,7 @@ async function markEventProcessed(eventId: string, type: string) {
 async function ensureLedgerOnce(data: {
   ref: string;
   userId: string;
-  type: "PURCHASE" | "REFUND" | "DISPUTE" | "ADJUSTMENT";
+  type: "PURCHASE" | "REFUND" | "ADJUST"; // ✅ matches your Prisma enum
   usdCents: number;
   creditsDeltaMilli: number;
 }) {
@@ -121,12 +121,12 @@ async function ensureLedgerOnce(data: {
   const existing = await prisma.creditTransaction.findUnique({ where: { ref: data.ref } });
   if (existing) return false;
 
-  // Race-safe path: if two webhook deliveries hit at once, the unique constraint wins.
+  // Race-safe path
   try {
     await prisma.creditTransaction.create({
       data: {
         userId: data.userId,
-        type: data.type,
+        type: data.type as any, // Prisma enum matches these strings
         usdCents: data.usdCents,
         creditsDeltaMilli: data.creditsDeltaMilli,
         ref: data.ref,
@@ -134,19 +134,16 @@ async function ensureLedgerOnce(data: {
     });
     return true;
   } catch (e: any) {
-    // Prisma unique constraint error (P2002) -> already created by another concurrent request
-    if (e?.code === "P2002") return false;
+    if (e?.code === "P2002") return false; // unique ref already exists
     throw e;
   }
 }
 
 // Fetch refunds robustly even when charge.refunds isn't expanded
 async function listRefundsForCharge(charge: Stripe.Charge): Promise<Stripe.Refund[]> {
-  // If Stripe expanded refunds and included data, use it
   const expanded = (charge as any)?.refunds?.data;
   if (Array.isArray(expanded) && expanded.length) return expanded as Stripe.Refund[];
 
-  // Otherwise, pull refunds from Stripe API (covers partial refunds + pagination)
   const all: Stripe.Refund[] = [];
   let starting_after: string | undefined;
 
@@ -179,14 +176,12 @@ export async function handleStripeWebhook(req: Request, res: Response) {
   let event: Stripe.Event;
 
   try {
-    // IMPORTANT: req.body must be raw Buffer (route uses express.raw({ type: "application/json" }))
     const rawBody = req.body as Buffer;
     event = stripe.webhooks.constructEvent(rawBody, sig, ENV.STRIPE_WEBHOOK_SECRET);
   } catch (err: any) {
     return res.status(400).send(`Webhook Error: ${err?.message ?? "Invalid signature"}`);
   }
 
-  // Optional event.id idempotency (requires webhookEvent table)
   if (await wasEventProcessed(event.id)) {
     return res.json({ received: true });
   }
@@ -196,18 +191,15 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       case "checkout.session.completed": {
         const session = event.data.object as Stripe.Checkout.Session;
 
-        // Only fulfill paid sessions
         if (session.payment_status && session.payment_status !== "paid") break;
 
         const userId = await resolveUserIdFromCheckoutSession(session);
         const amountTotal = typeof session.amount_total === "number" ? session.amount_total : 0;
-
         if (!userId || amountTotal <= 0) break;
 
         const usd = centsToUsd(amountTotal);
         const creditsDeltaMilli = usdToMilliCredits(usd);
 
-        // CANONICAL purchase ref: session.id (prevents double-credit across multiple event types)
         const ref = `stripe:session:${session.id}:purchase`;
 
         const created = await ensureLedgerOnce({
@@ -228,7 +220,6 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       case "payment_intent.succeeded": {
         const pi = event.data.object as Stripe.PaymentIntent;
 
-        // Find session so we can use canonical session ref and resolve userId
         const session = await findSessionByPaymentIntent(pi.id);
         if (!session) break;
 
@@ -236,13 +227,12 @@ export async function handleStripeWebhook(req: Request, res: Response) {
 
         const userId = await resolveUserIdFromCheckoutSession(session);
         const amount = typeof pi.amount_received === "number" ? pi.amount_received : 0;
-
         if (!userId || amount <= 0) break;
 
         const usd = centsToUsd(amount);
         const creditsDeltaMilli = usdToMilliCredits(usd);
 
-        // SAME canonical ref as checkout.session.completed
+        // SAME canonical ref as checkout session
         const ref = `stripe:session:${session.id}:purchase`;
 
         const created = await ensureLedgerOnce({
@@ -263,14 +253,12 @@ export async function handleStripeWebhook(req: Request, res: Response) {
       case "charge.refunded": {
         const charge = event.data.object as Stripe.Charge;
 
-        // Resolve the session/user from the charge -> payment_intent
         const session = await findSessionByCharge(charge);
         if (!session) break;
 
         const userId = await resolveUserIdFromCheckoutSession(session);
         if (!userId) break;
 
-        // FIX: don't use charge.amount_refunded (cumulative). Use refund.id (unique per refund).
         const refunds = await listRefundsForCharge(charge);
         if (!refunds.length) break;
 
@@ -324,10 +312,11 @@ export async function handleStripeWebhook(req: Request, res: Response) {
 
           const ref = `stripe:dispute:${dispute.id}:created`;
 
+          // ✅ Use ADJUST (your schema) instead of DISPUTE
           const created = await ensureLedgerOnce({
             ref,
             userId,
-            type: "DISPUTE",
+            type: "ADJUST",
             usdCents: disputedCents,
             creditsDeltaMilli: -creditsDeltaMilli,
           });
@@ -362,10 +351,11 @@ export async function handleStripeWebhook(req: Request, res: Response) {
         const closedCents = typeof dispute.amount === "number" ? dispute.amount : 0;
         const ref = `stripe:dispute:${dispute.id}:closed:${dispute.status}`;
 
+        // ✅ Use ADJUST (your schema) instead of ADJUSTMENT
         await ensureLedgerOnce({
           ref,
           userId,
-          type: "ADJUSTMENT",
+          type: "ADJUST",
           usdCents: closedCents,
           creditsDeltaMilli: 0,
         });
@@ -380,7 +370,6 @@ export async function handleStripeWebhook(req: Request, res: Response) {
     await markEventProcessed(event.id, event.type);
   } catch (err) {
     console.error("Stripe webhook handler error:", err);
-    // Return 200 to prevent retry storms; you can switch to 500 if you WANT Stripe retries.
   }
 
   return res.json({ received: true });
